@@ -1,0 +1,90 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: invoices
+      POSTGRES_PASSWORD: invoices
+      POSTGRES_DB: invoices
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invoices -d invoices"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  mockpsp:
+    build: .
+    command: ["/app/mockpsp"]
+    environment:
+      LISTEN_ADDR: ":8081"
+      TIMEOUT_DELAY: "30s"
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  webhook-sink:
+    build: .
+    command: ["/app/webhooksink"]
+    environment:
+      LISTEN_ADDR: ":9000"
+      WEBHOOK_SECRET: "whsec_demo_secret_for_local_compose_only"
+    ports:
+      - "9000:9000"
+
+  api:
+    build: .
+    command: ["/app/api"]
+    depends_on:
+      db:
+        condition: service_healthy
+      mockpsp:
+        condition: service_healthy
+      webhook-sink:
+        condition: service_started
+    environment:
+      LISTEN_ADDR: ":8080"
+      DATABASE_URL: "postgres://invoices:invoices@db:5432/invoices?sslmode=disable"
+      PSP_BASE_URL: "http://mockpsp:8081"
+      PSP_TIMEOUT: "5s"
+      RECONCILE_AFTER: "10s"
+      # Local demo only: seeds a business with this API key and a webhook endpoint that
+      # points at the sink, so everything works with zero manual steps.
+      DEMO_API_KEY: "sk_test_demo_key_local_only"
+      DEMO_WEBHOOK_URL: "http://webhook-sink:9000/webhooks"
+      DEMO_WEBHOOK_SECRET: "whsec_demo_secret_for_local_compose_only"
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Integration tests: docker compose --profile test run --rm tests
+  tests:
+    profiles: ["test"]
+    image: golang:1.24-alpine
+    working_dir: /src
+    volumes:
+      - .:/src
+      - gocache:/root/.cache/go-build
+      - gomod:/go/pkg/mod
+    environment:
+      CGO_ENABLED: "0"
+      TEST_DATABASE_URL: "postgres://invoices:invoices@db:5432/invoices?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["go", "test", "./...", "-count=1", "-v"]
+
+volumes:
+  pgdata:
+  gocache:
+  gomod:
