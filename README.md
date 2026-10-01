@@ -11,7 +11,13 @@ A small billing backend:
 
 ## Demo Video
 
-> **TODO:** add the Loom / Drive link here. It must open without a login.
+**[Watch the demo video (Google Drive)](https://drive.google.com/file/d/1wY4seUO_onKkjJ71gwwoj1BLVPXTtP13/view?usp=sharing)**
+
+It covers, in order:
+1. The architecture overview.
+2. The live demo: customer, invoice, a successful payment, a `tok_card_declined` payment, and the webhook deliveries.
+3. The state machine walkthrough.
+4. The `tok_timeout` failure-mode walkthrough in the code.
 
 ## Why Go instead of Rust
 
