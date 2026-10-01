@@ -1,0 +1,9 @@
+/bin/
+*.exe
+*.test
+*.out
+.env
+# The assignment brief is not part of the submission.
+*.docx
+# Personal recording notes, not part of the submission.
+Demo_Video_Script.pdf

@@ -1,0 +1,4 @@
+.git
+*.docx
+*.md
+!README.md
