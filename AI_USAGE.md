@@ -1,42 +1,58 @@
 # AI Usage
 
-> **Note to self before submitting:** this file is graded on honesty and specificity.
-> The factual record below is accurate. The sections marked ✍️ must be rewritten in **my
-> own words**, about decisions I actually made or checked. Delete this note afterwards.
-
 ## Tools used and for what
 
-- **Claude Code (Claude Opus, in VS Code)** was the main tool. I gave it the assignment brief and asked for a structured breakdown of what was required and how it would be graded. Then I asked it to build the service in **Go** (it had first proposed Rust/Axum, the brief's preference; I overrode that). It wrote most of the code, the migrations, docker-compose, the tests and the first drafts of DESIGN.md, README.md and openapi.yaml.
-- It also ran the verification loop in my terminal:
-  - `go build`, `go vet`, and the integration tests against the compose Postgres (repeated 5 times to check for flakiness),
-  - a live `docker compose up` session with curl for every scenario, including waiting out a real 30s `tok_timeout` to watch the reconciler settle it and the webhook sink verify the signatures.
+**Claude Code (Claude Opus, in VS Code)** was my main tool, and it did most of the typing.
 
-## Three decisions I made myself ✍️
+- **Reading the brief.** I gave it the assignment document and asked for a structured breakdown of what had to be built and how it is graded.
+- **Code.** It wrote most of the code, the SQL migration, docker-compose, the integration tests and a PowerShell demo script (`scripts/demo.ps1`).
+- **Docs.** It wrote the first drafts of DESIGN.md, the README and openapi.yaml.
+- **Verification.** It ran `go build`, `go vet` and the integration tests against the compose Postgres. It repeated the tests 5 times to check for flaky results, and ran a live `docker compose up` session with curl for every scenario.
+- **Video prep.** It helped me prepare: it explained each demo step and each part of `payment.go` in simple terms, and produced a step-by-step guide of what to show on screen.
 
-Rewrite each one: what the AI proposed (if anything), what I chose, and why. Candidates from this session, keeping only the ones that are genuinely mine:
+I used no other AI tools.
 
-1. **Go instead of Rust.** The AI's first plan was Rust/Axum because the brief prefers it. I chose Go because … *(my reason)*.
-2. ✍️ *(e.g. a pending payment returns 202 rather than 504 or a failure; `uncollectible` stays payable; no `draft` state; declines return 402 in the error envelope.)* Pick the ones I deliberated on and explain my reasoning.
-3. ✍️ *(…)*
+## Three decisions
 
-## Things the AI got wrong or I had to correct
+Only the first decision went against what the AI suggested. For the other two, the AI proposed the approach. I'm listing them because I reviewed them, understood them well enough to explain them on camera, and chose to keep them.
 
-These are real, from this session:
+1. **Go instead of Rust: my decision, against the AI's first plan.**
+   - **AI proposed:** Rust with Axum, because the brief prefers Rust.
+   - **I chose:** Go.
+   - **Why:** I work as a Go backend developer at my current company and have 2 years of Go experience. Go is simple and fast. Within a 4–6 hour budget, I can reason about correctness much better in Go than in Rust. I would rather be sure the payment logic is right than fight the language.
 
-1. **Dependency/toolchain mismatch.** It first pulled `pgx v5.11`, which silently raised `go.mod` to `go 1.25` while my machine has Go 1.24.6. It was caught on review and pinned to `pgx v5.7.5`.
-2. **A wrong test expectation.** The first version of the "concurrent duplicates of one idempotency key" test asserted that every response was 200. That's wrong for this design: a duplicate that arrives while the original is still waiting on the PSP correctly gets **202** for the same in-flight attempt. The test now asserts 200 or 202 and that every response refers to the **same payment attempt**, with exactly one PSP call.
-3. **Environment assumptions.** The first compose file hard-coded host ports 5432 and 8080, which were already taken on my machine (a local Postgres and a RethinkDB on 8080, which answered the first curl calls with 403/405). Host ports are now overridable (`API_PORT`, `DB_PORT`), and the database defaults to 5433.
+2. **On a PSP timeout, return 202 "pending" and don't guess: AI proposal, which I kept.**
+   - **AI proposed:** leave the attempt `pending`, return 202, and let a background reconciler ask the PSP for the real result.
+   - **I chose:** to keep it after walking through the code.
+   - **Why:** when the PSP times out, the card may already have been charged. Marking it "failed" would let the customer pay again and be charged twice. Marking it "paid" would be a guess with no proof. Pending, plus blocking new payments while pending, is the only safe answer. This is the failure mode I explain in the video.
 
-✍️ Add anything I corrected myself while reviewing the code.
+3. **Lock the invoice row with `SELECT … FOR UPDATE`: AI proposal, which I kept.**
+   - **AI proposed:** lock the invoice row before creating a payment attempt, with a partial unique index (one pending attempt per invoice) as a backstop. The alternatives were advisory locks or optimistic concurrency.
+   - **I chose:** to keep it.
+   - **Why:** it's the simplest mechanism to explain and to trust. Payments on the same invoice simply run one at a time. The lock is held only for a few milliseconds, never during the PSP call. The concurrency test (25 parallel requests, exactly one charge) confirmed it.
+
+## Things the AI got wrong or that had to be corrected
+
+These all happened in this session:
+
+1. **Dependency and toolchain mismatch.** The AI first pulled `pgx v5.11`, which silently raised `go.mod` to `go 1.25`. My machine has Go 1.24.6. This was caught and `pgx` was pinned to v5.7.5.
+2. **A wrong test expectation.** The first version of the test "concurrent duplicates of one idempotency key" expected every response to be 200. That's wrong for this design: a duplicate that arrives while the original is still waiting on the PSP correctly gets 202 for the same in-flight attempt. The test now accepts 200 or 202, and checks that all responses refer to the same payment attempt with exactly one PSP call.
+3. **Assumptions about my environment.** The first compose file hard-coded host ports 5432 and 8080. On my machine both were already in use, by a local Postgres and a RethinkDB on 8080. RethinkDB answered the first curl calls with 403 and 405, which looked like bugs in the app. Host ports are now overridable (`API_PORT`, `DB_PORT`), and the database defaults to 5433.
 
 ## How I verified correctness
 
-- The three required integration tests run against real Postgres (not mocks of the database) and passed 5 runs in a row.
-- In a manual run on `docker compose up`:
-  - success gave 200 and the invoice became `paid`,
-  - `tok_card_declined` gave 402 and the invoice stayed `open`,
-  - `tok_timeout` gave 202 after 5s; about 30s later the reconciler marked it `paid`, and replaying the key returned 200 with `Idempotent-Replayed: true`,
-  - voiding a paid invoice gave 409 `invalid_state_transition`,
-  - a request with no key gave 401,
-  - the webhook sink logged `signature: valid` for `invoice.created`, `invoice.paid` and `invoice.payment_failed`.
-- ✍️ What I personally read line by line: at least `internal/payment/payment.go`, `reconciler.go` and `internal/invoice/statemachine.go`, since those are the walkthroughs in the video.
+- **Tests.** The three required integration tests run against real Postgres, not a mocked database. They passed 5 runs in a row, and also inside Docker (`docker compose --profile test run --rm tests`).
+- **The live demo.** I ran the whole demo myself step by step before recording (`scripts/demo.ps1`). I checked each result:
+
+  | Scenario | Result |
+  |---|---|
+  | Pay with `tok_success` | 200, and the invoice becomes `paid` |
+  | Retry with the same key | Same response, with `Idempotent-Replayed: true` |
+  | Pay with `tok_card_declined` | 402, and the invoice stays `open` |
+  | Void a paid invoice | 409 `invalid_state_transition` |
+  | Pay with `tok_timeout` | 202 after 5 s |
+  | Second payment while pending | 409 `payment_in_progress` |
+  | About 45 s later | The reconciler marked the invoice `paid` |
+  | All webhooks | Arrived at the sink with valid signatures |
+
+- **Reading the code.** I read `internal/payment/payment.go` (the reserve → charge → apply flow) and `reconciler.go` before recording, so I could walk through them line by line in the video.
